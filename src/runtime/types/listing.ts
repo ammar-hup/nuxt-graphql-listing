@@ -285,6 +285,12 @@ export interface UseListingOptions<
   searchInFilters?: boolean
 
   /**
+   * Milliseconds to wait after the last change to `search` (or `setSearch`) before it is applied
+   * to the query and the URL; `search` itself updates at once (default: 300, 0 = off)
+   */
+  searchDebounce?: number
+
+  /**
    * Custom result mapper (advanced)
    * Override auto-mapping from dataPath
    */

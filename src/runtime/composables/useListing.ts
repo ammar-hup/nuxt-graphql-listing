@@ -1,7 +1,7 @@
-import type {ListingResult, ListingState, SortInput, UseListingOptions, UseListingReturn} from '../types/listing'
+import type {FilterFieldConfig, ListingResult, ListingState, SortInput, UseListingOptions, UseListingReturn} from '../types/listing'
 import {deepEqual, normalizeQuery} from '../utils'
 import {buildListingQuery, parseListingQuery} from '../utils/urlState'
-import {computed, nextTick, type Ref, ref, watch, unref} from 'vue'
+import {computed, getCurrentScope, nextTick, onScopeDispose, type Ref, ref, watch, unref} from 'vue'
 import {useRoute, useRouter} from 'vue-router'
 
 /**
@@ -101,6 +101,48 @@ function resultError(result: any): Error | null {
   return new Error(message || 'Request failed', {cause: source})
 }
 
+/**
+ * The query keys buildListingQuery can write for this filterConfig.
+ */
+function listingQueryKeys(filterConfig: FilterFieldConfig[]): Set<string> {
+  const keys = new Set(['offset', 'limit', 'search', 'sort'])
+  for (const field of filterConfig as any[]) {
+    switch (field.kind) {
+      case 'separator':
+        break
+      case 'switch-group':
+        for (const sw of field.switches) keys.add(sw.field)
+        break
+      case 'int-range':
+      case 'decimal-range':
+      case 'rating':
+        keys.add(`${field.field}Min`).add(`${field.field}Max`)
+        break
+      case 'datetime-range':
+        keys.add(`${field.field}From`).add(`${field.field}To`)
+        break
+      case 'datetime-range-group':
+        for (const df of field.dateFields) keys.add(`${df.field}From`).add(`${df.field}To`)
+        break
+      default:
+        keys.add('field' in field ? field.field : field.key)
+    }
+  }
+  return keys
+}
+
+/**
+ * The listing's own keys of a query, every value as a string (the form route.query carries).
+ */
+function ownedQuery(query: Record<string, any>, keys: Set<string>): Record<string, any> {
+  const out: Record<string, any> = {}
+  for (const [k, v] of Object.entries(normalizeQuery(query))) {
+    if (!keys.has(k)) continue
+    out[k] = Array.isArray(v) ? v.map(String) : String(v)
+  }
+  return out
+}
+
 export function useListing<
   Item = any,
   Filters extends Record<string, any> = Record<string, any>,
@@ -124,6 +166,7 @@ export function useListing<
     extraFilters = {} as Partial<Filters>,
     searchKey = 'search',
     searchInFilters = false,
+    searchDebounce = 300,
     mapResult: customMapResult,
   } = options
 
@@ -162,14 +205,63 @@ export function useListing<
     structuredClone(hydratedState.sort ?? initialSort) as Sort,
   )
 
+  // `search` echoes the input; `appliedSearch` is what the query and the URL use.
   const search = ref<string>(hydratedState.search ?? '')
+  const appliedSearch = ref<string>(search.value)
+
+  // No timers on the server or outside an effect scope: nothing would clear them.
+  const debounceSearch = searchDebounce > 0 && !import.meta.server && !!getCurrentScope()
+  let searchTimer: ReturnType<typeof setTimeout> | null = null
+  let pendingSearch: string | null = null
+  let pendingOffsetReset = false
+
+  function cancelSearchCommit() {
+    if (searchTimer) clearTimeout(searchTimer)
+    searchTimer = null
+    pendingSearch = null
+    pendingOffsetReset = false
+  }
+
+  // Search and setSearch's offset reset land in one tick, so a pause sends one request.
+  // A search equal to the applied one once trimmed is not re-applied: it would refetch the same query.
+  function commitSearch() {
+    const resetOffset = pendingOffsetReset
+    cancelSearchCommit()
+    const next = search.value ?? ''
+    if (next.trim() !== appliedSearch.value.trim()) appliedSearch.value = next
+    if (resetOffset) offset.value = 0
+  }
+
+  function scheduleSearchCommit(resetOffset: boolean) {
+    if (resetOffset) pendingOffsetReset = true
+    if (searchTimer) clearTimeout(searchTimer)
+    pendingSearch = search.value
+    if (debounceSearch) {
+      searchTimer = setTimeout(commitSearch, searchDebounce)
+    } else {
+      commitSearch()
+    }
+  }
+
+  if (getCurrentScope()) onScopeDispose(cancelSearchCommit)
+
+  // A direct write to `search` (v-model) is debounced like setSearch.
+  watch(search, (value) => {
+    if (value == null) {
+      search.value = ''
+      return
+    }
+    if (value === pendingSearch) return
+    if (searchTimer == null && value.trim() === appliedSearch.value.trim()) return
+    scheduleSearchCommit(false)
+  })
 
   const state = computed<ListingState<Filters, Sort>>(() => ({
     offset: offset.value,
     limit: limit.value,
     filters: filters.value,
     sort: sort.value,
-    search: search.value,
+    search: appliedSearch.value,
   }))
 
   // ---------- Build variables ----------
@@ -178,7 +270,7 @@ export function useListing<
     const vars = defaultBuildVariables(state.value, filterKey, wrapInput, resolvedExtraFilters)
 
     // Add search to variables
-    const searchValue = search.value?.trim()
+    const searchValue = appliedSearch.value?.trim()
     if (searchValue) {
       const target = wrapInput ? vars.input : vars
       if (searchInFilters) {
@@ -203,8 +295,9 @@ export function useListing<
 
   let fetchCount = 0
 
+  // Only the newest request writes state; an older, slower response is dropped.
   const fetchData = async () => {
-    fetchCount++
+    const id = ++fetchCount
     pending.value = true
     error.value = null
     try {
@@ -213,6 +306,7 @@ export function useListing<
         variables: variables.value,
         fetchPolicy: 'network-only',
       })
+      if (id !== fetchCount) return
       const failure = resultError(result)
       if (failure) {
         error.value = failure
@@ -220,9 +314,9 @@ export function useListing<
         data.value = mapResult(result.data)
       }
     } catch (e) {
-      error.value = e as Error
+      if (id === fetchCount) error.value = e as Error
     } finally {
-      pending.value = false
+      if (id === fetchCount) pending.value = false
     }
   }
 
@@ -242,6 +336,10 @@ export function useListing<
   let internalUpdate = false
 
   if (urlBinding && filterConfig) {
+    const ownedKeys = listingQueryKeys(filterConfig)
+    // Queries sent to router.replace whose route update has not landed yet, oldest first.
+    let pendingEchoes: Record<string, any>[] = []
+
     // State → URL
     watch(
       state,
@@ -251,6 +349,7 @@ export function useListing<
         const current = route.query as Record<string, any>
 
         if (!deepEqual(normalizeQuery(current), normalizeQuery(nextQuery))) {
+          pendingEchoes.push(ownedQuery(nextQuery, ownedKeys))
           void router.replace({query: nextQuery, hash: route.hash})
         }
 
@@ -264,23 +363,46 @@ export function useListing<
       () => route.query,
       (q) => {
         if (internalUpdate) return
-        const parsed = parseListingQuery(q as Record<string, any>, filterConfig) || {}
-
-        if (parsed.offset != null && parsed.offset !== offset.value) {
-          offset.value = parsed.offset
+        // Our own router.replace landing, even after state has moved on: applying it would undo newer state.
+        const owned = ownedQuery(q as Record<string, any>, ownedKeys)
+        const echo = pendingEchoes.findIndex(sent => deepEqual(sent, owned))
+        if (echo !== -1) {
+          pendingEchoes = pendingEchoes.slice(echo + 1)
+          return
         }
-        if (parsed.limit != null && parsed.limit !== limit.value) {
-          limit.value = parsed.limit
+
+        // An absent offset or sort means the default (buildListingQuery omits them); limit is kept.
+        const parsed = parseListingQuery(q as Record<string, any>, filterConfig) || {}
+        const target = {
+          offset: parsed.offset ?? initialOffset,
+          limit: parsed.limit ?? limit.value,
+          filters: (parsed.filters ?? {}) as Filters,
+          sort: (parsed.sort ?? initialSort) as Sort,
+          search: parsed.search ?? '',
+        }
+        // Nothing of ours changed (e.g. only a foreign key like ?tab=): keep a search still being typed.
+        const asQuery = (s: ListingState<Filters, Sort>) => ownedQuery(buildListingQuery(s as any, filterConfig), ownedKeys)
+        if (deepEqual(asQuery(target), asQuery(state.value))) return
+        pendingEchoes = []
+
+        if (target.offset !== offset.value) {
+          offset.value = target.offset
+        }
+        if (target.limit !== limit.value) {
+          limit.value = target.limit
         }
         if (parsed.filters && !deepEqual(parsed.filters, filters.value)) {
           filters.value = parsed.filters as Filters
         }
-        if (parsed.sort && !deepEqual(parsed.sort, sort.value)) {
-          sort.value = parsed.sort as Sort
+        if (!deepEqual(target.sort, sort.value)) {
+          sort.value = structuredClone(target.sort) as Sort
         }
-        const parsedSearch = parsed.search ?? ''
-        if (parsedSearch !== search.value) {
-          search.value = parsedSearch
+        cancelSearchCommit()
+        if (target.search !== appliedSearch.value) {
+          appliedSearch.value = target.search
+        }
+        if (target.search !== search.value) {
+          search.value = target.search
         }
       },
     )
@@ -326,7 +448,7 @@ export function useListing<
 
   function setSearch(value: string) {
     search.value = value
-    offset.value = 0
+    scheduleSearchCommit(true)
   }
 
   return {

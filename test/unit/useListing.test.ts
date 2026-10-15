@@ -1,12 +1,28 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { reactive } from 'vue'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { effectScope, reactive } from 'vue'
 import { useListing } from '../../src/runtime/composables/useListing'
 import { clearedFilters } from '../../src/runtime/utils/filters'
 
+const nav = vi.hoisted(() => ({ route: null as any, replace: null as any }))
+
 vi.mock('vue-router', () => ({
-  useRoute: () => reactive({ query: {}, hash: '' }),
-  useRouter: () => ({ replace: vi.fn() }),
+  useRoute: () => nav.route,
+  useRouter: () => ({ replace: nav.replace }),
 }))
+
+// Like vue-router: the route updates a microtask later, with string values (arrays kept).
+function resetRouter(query: Record<string, any> = {}) {
+  nav.route = reactive({ query, hash: '' })
+  nav.replace = vi.fn(async ({ query: next }: { query: Record<string, any> }) => {
+    await Promise.resolve()
+    nav.route.query = Object.fromEntries(
+      Object.entries(next).map(([k, v]) => [k, Array.isArray(v) ? v.map(String) : String(v)]),
+    )
+  })
+}
+
+resetRouter()
+beforeEach(() => resetRouter())
 
 const flush = () => new Promise(resolve => setTimeout(resolve, 0))
 
@@ -25,7 +41,10 @@ function fakeClient(responses: any[]) {
 
 function setup(responses: any[], options: Record<string, any> = {}) {
   const client = fakeClient(responses)
-  const listing = useListing({ query: {} as any, client: client as any, dataPath: 'list', ...options })
+  // Inside a scope, as in a component: outside one the search applies at once.
+  const listing = effectScope().run(() =>
+    useListing({ query: {} as any, client: client as any, dataPath: 'list', ...options }),
+  )!
   return { client, listing }
 }
 
@@ -165,5 +184,356 @@ describe('useListing setFilter and setOffset in the same tick', () => {
     listing.setFilter({ isFree: true } as any)
     await flush()
     expect(client.query).toHaveBeenCalledTimes(2)
+  })
+})
+
+const settle = async () => {
+  for (let i = 0; i < 20; i++) await Promise.resolve()
+}
+
+const filterConfig = [{ kind: 'select', key: 'categoryId', field: 'categoryId', label: 'Category', options: [] }]
+
+function deferredClient() {
+  const calls: Array<{ resolve: (v: any) => void, reject: (e: any) => void }> = []
+  const query = vi.fn(() => new Promise((resolve, reject) => {
+    calls.push({ resolve, reject })
+  }))
+  return { query, calls }
+}
+
+describe('useListing debounced search', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('sends one request and one URL update after typing through setSearch', async () => {
+    const { client, listing } = setup([ok([])], { filterConfig, initialOffset: 40 })
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(1)
+
+    for (const value of ['a', 'ab', 'abc']) {
+      listing.setSearch(value)
+      expect(listing.search.value).toBe(value)
+      await settle()
+      vi.advanceTimersByTime(100)
+    }
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(1)
+    expect(nav.replace).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(300)
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(2)
+    expect(lastInput(client).search).toBe('abc')
+    expect(lastInput(client).offset).toBe(0)
+    expect(listing.offset.value).toBe(0)
+    expect(nav.replace).toHaveBeenCalledTimes(1)
+  })
+
+  it('debounces a direct write to search (v-model)', async () => {
+    const { client, listing } = setup([ok([])], { filterConfig })
+    await settle()
+    listing.search.value = 'x'
+    await settle()
+    vi.advanceTimersByTime(100)
+    listing.search.value = 'xy'
+    await settle()
+    vi.advanceTimersByTime(299)
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(1)
+
+    vi.advanceTimersByTime(1)
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(2)
+    expect(lastInput(client).search).toBe('xy')
+    expect(nav.replace).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends one request without search after clearing it', async () => {
+    const { client, listing } = setup([ok([])])
+    await settle()
+    listing.setSearch('a')
+    vi.advanceTimersByTime(300)
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(2)
+
+    listing.setSearch('')
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(2)
+    vi.advanceTimersByTime(300)
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(3)
+    expect(lastInput(client)).not.toHaveProperty('search')
+  })
+
+  it('sends one request when the commit and a same-offset setOffset share a tick', async () => {
+    const { client, listing } = setup([ok([])])
+    await settle()
+    listing.setSearch('a')
+    vi.advanceTimersByTime(300)
+    listing.setOffset(0)
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(2)
+    expect(lastInput(client).search).toBe('a')
+  })
+
+  it('applies at once with searchDebounce 0', async () => {
+    const { client, listing } = setup([ok([])], { searchDebounce: 0, initialOffset: 20 })
+    await settle()
+    listing.setSearch('a')
+    expect(listing.offset.value).toBe(0)
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(2)
+    expect(lastInput(client)).toMatchObject({ search: 'a', offset: 0 })
+
+    listing.search.value = 'ab'
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(3)
+    expect(lastInput(client).search).toBe('ab')
+  })
+
+  it('keeps what is being typed when its own URL update lands', async () => {
+    const { client, listing } = setup([ok([])], { filterConfig })
+    await settle()
+    listing.setSearch('abc')
+    vi.advanceTimersByTime(300)
+    listing.search.value = 'abcd'
+    await settle()
+    expect(nav.route.query.search).toBe('abc')
+    expect(listing.search.value).toBe('abcd')
+
+    vi.advanceTimersByTime(300)
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(3)
+    expect(lastInput(client).search).toBe('abcd')
+  })
+})
+
+describe('useListing response order', () => {
+  it('keeps the newest response when an older one arrives later', async () => {
+    const client = deferredClient()
+    const listing = useListing({ query: {} as any, client: client as any, dataPath: 'list' })
+    client.calls[0]!.resolve(ok([{ id: 0 }]))
+    await settle()
+
+    void listing.refetch()
+    void listing.refetch()
+    const [a, b] = client.calls.slice(1)
+    b!.resolve(ok([{ id: 'b' }]))
+    await settle()
+    expect(listing.items.value).toEqual([{ id: 'b' }])
+    expect(listing.loading.value).toBe(false)
+
+    a!.resolve(ok([{ id: 'a' }]))
+    await settle()
+    expect(listing.items.value).toEqual([{ id: 'b' }])
+  })
+
+  it('stays loading until the newest request ends, and drops an older error', async () => {
+    const client = deferredClient()
+    const listing = useListing({ query: {} as any, client: client as any, dataPath: 'list' })
+    client.calls[0]!.resolve(ok([{ id: 0 }]))
+    await settle()
+
+    void listing.refetch()
+    void listing.refetch()
+    const [a, b] = client.calls.slice(1)
+    a!.reject(new Error('old'))
+    await settle()
+    expect(listing.loading.value).toBe(true)
+    expect(listing.error.value).toBeNull()
+
+    b!.resolve(ok([{ id: 'b' }]))
+    await settle()
+    expect(listing.loading.value).toBe(false)
+    expect(listing.items.value).toEqual([{ id: 'b' }])
+  })
+
+  it('keeps the newest error when an older request succeeds later', async () => {
+    const client = deferredClient()
+    const listing = useListing({ query: {} as any, client: client as any, dataPath: 'list' })
+    client.calls[0]!.resolve(ok([{ id: 0 }]))
+    await settle()
+
+    void listing.refetch()
+    void listing.refetch()
+    const [a, b] = client.calls.slice(1)
+    b!.resolve({ data: null, errors: [{ message: 'newest' }] })
+    await settle()
+    a!.resolve(ok([{ id: 'a' }]))
+    await settle()
+    expect(listing.error.value?.message).toBe('newest')
+    expect(listing.items.value).toEqual([{ id: 0 }])
+    expect(listing.loading.value).toBe(false)
+  })
+})
+
+describe('useListing Back and forward', () => {
+  const initialSort = [{ field: 'createdAt', direction: 'DESC' }]
+
+  it('restores the default offset and sort when the URL has neither', async () => {
+    resetRouter({ offset: '20', sort: 'title:DESC' })
+    const { client, listing } = setup([ok([])], { filterConfig, initialSort })
+    await settle()
+    expect(listing.offset.value).toBe(20)
+    expect(listing.sort.value).toEqual([{ field: 'title', direction: 'DESC' }])
+
+    nav.route.query = {}
+    await settle()
+    expect(listing.offset.value).toBe(0)
+    expect(listing.sort.value).toEqual(initialSort)
+    expect(listing.sort.value).not.toBe(initialSort)
+    expect(client.query).toHaveBeenCalledTimes(2)
+    expect(lastInput(client)).toMatchObject({ offset: 0, sort: { createdAt: 'DESC' } })
+  })
+
+  it('applies the offset and sort the URL has', async () => {
+    const { client, listing } = setup([ok([])], { filterConfig })
+    await settle()
+    nav.route.query = { offset: '20', sort: 'title:DESC' }
+    await settle()
+    expect(listing.offset.value).toBe(20)
+    expect(listing.sort.value).toEqual([{ field: 'title', direction: 'DESC' }])
+    expect(client.query).toHaveBeenCalledTimes(2)
+    expect(lastInput(client)).toMatchObject({ offset: 20, sort: { title: 'DESC' } })
+  })
+
+  it('cancels a pending search commit and takes the URL search', async () => {
+    vi.useFakeTimers()
+    try {
+      const { client, listing } = setup([ok([])], { filterConfig })
+      await settle()
+      listing.setSearch('ab')
+      await settle()
+      nav.route.query = { search: 'zz' }
+      await settle()
+      expect(listing.search.value).toBe('zz')
+      expect(client.query).toHaveBeenCalledTimes(2)
+      expect(lastInput(client).search).toBe('zz')
+
+      vi.advanceTimersByTime(1000)
+      await settle()
+      expect(client.query).toHaveBeenCalledTimes(2)
+      expect(nav.replace.mock.calls.every(([arg]: any) => arg.query.search === 'zz')).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('useListing search edge cases', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('keeps the page and the URL search when Back lands while a setSearch commit is pending', async () => {
+    const { client, listing } = setup([ok([])], { filterConfig })
+    await settle()
+    listing.setSearch('ab')
+    await settle()
+    nav.route.query = { search: 'zz', offset: '20' }
+    await settle()
+    expect(listing.offset.value).toBe(20)
+    expect(listing.search.value).toBe('zz')
+    expect(client.query).toHaveBeenCalledTimes(2)
+    expect(lastInput(client)).toMatchObject({ search: 'zz', offset: 20 })
+    const replaces = nav.replace.mock.calls.length
+
+    vi.advanceTimersByTime(1000)
+    await settle()
+    expect(listing.offset.value).toBe(20)
+    expect(client.query).toHaveBeenCalledTimes(2)
+    expect(nav.replace).toHaveBeenCalledTimes(replaces)
+  })
+
+  it('keeps what is being typed when a key the listing does not own changes', async () => {
+    resetRouter({ tab: 'info' })
+    const { client, listing } = setup([ok([])], { filterConfig })
+    await settle()
+    listing.setSearch('ab')
+    await settle()
+    nav.route.query = { ...nav.route.query, tab: 'other', utm_source: ['a', 'b'] }
+    await settle()
+    expect(listing.search.value).toBe('ab')
+    expect(client.query).toHaveBeenCalledTimes(1)
+
+    vi.advanceTimersByTime(300)
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(2)
+    expect(lastInput(client).search).toBe('ab')
+  })
+
+  it('ignores its own URL update landing after state moved on', async () => {
+    const { client, listing } = setup([ok([])], { filterConfig })
+    await settle()
+    listing.setSearch('abc')
+    vi.advanceTimersByTime(300)
+    await Promise.resolve()
+    expect(nav.replace).toHaveBeenCalledTimes(1)
+    listing.setOffset(20)
+    listing.search.value = 'abcd'
+    await settle()
+    expect(listing.offset.value).toBe(20)
+    expect(listing.search.value).toBe('abcd')
+
+    vi.advanceTimersByTime(300)
+    await settle()
+    expect(lastInput(client)).toMatchObject({ search: 'abcd', offset: 20 })
+  })
+
+  it('clears the search when v-model writes null', async () => {
+    resetRouter({ search: 'abc' })
+    const { client, listing } = setup([ok([])], { filterConfig })
+    await settle()
+    expect(lastInput(client).search).toBe('abc')
+    ;(listing.search as any).value = null
+    await settle()
+    expect(listing.search.value).toBe('')
+    vi.advanceTimersByTime(300)
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(2)
+    expect(lastInput(client)).not.toHaveProperty('search')
+  })
+
+  it('sends no request for a search that only adds whitespace', async () => {
+    const { client, listing } = setup([ok([])], { filterConfig })
+    await settle()
+    listing.setSearch('abc')
+    vi.advanceTimersByTime(300)
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(2)
+
+    listing.search.value = 'abc '
+    await settle()
+    vi.advanceTimersByTime(300)
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(2)
+    expect(listing.search.value).toBe('abc ')
+  })
+
+  it('still resets the page when setSearch only adds whitespace', async () => {
+    const { client, listing } = setup([ok([])], { filterConfig })
+    await settle()
+    listing.setSearch('abc')
+    vi.advanceTimersByTime(300)
+    await settle()
+    listing.setOffset(20)
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(3)
+
+    listing.setSearch('abc ')
+    vi.advanceTimersByTime(300)
+    await settle()
+    expect(listing.offset.value).toBe(0)
+    expect(client.query).toHaveBeenCalledTimes(4)
+    expect(lastInput(client)).toMatchObject({ search: 'abc', offset: 0 })
+  })
+
+  it('applies at once outside an effect scope', async () => {
+    const client = fakeClient([ok([])])
+    const listing = useListing({ query: {} as any, client: client as any, dataPath: 'list' })
+    await settle()
+    listing.setSearch('a')
+    await settle()
+    expect(client.query).toHaveBeenCalledTimes(2)
+    expect(lastInput(client).search).toBe('a')
   })
 })
