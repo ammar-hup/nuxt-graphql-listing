@@ -27,6 +27,22 @@ My new Nuxt module for doing amazing things.
 - 🚠 &nbsp;Bar
 - 🌲 &nbsp;Baz
 
+## Search debounce
+
+`useListing` updates `search` as the visitor types, but applies it to the query and the URL only
+after a pause of `searchDebounce` milliseconds (default `300`; `0` turns it off). This covers both
+`setSearch` and a direct `v-model` on `search`; `setSearch`'s reset to the first page is applied
+with the search, so a pause sends one request. On the server, or outside a component or effect
+scope, the search applies at once. Set `searchDebounce: 0` if the page already
+debounces its input, so the two delays don't stack.
+
+## History
+
+Each category, filter, sort, page or committed search change adds a browser-history entry
+(`router.push`), so Back undoes it; state restored from the URL on Back/forward is written with
+`router.replace` and adds none. With `searchDebounce: 0` every committed keystroke adds its own
+entry, and changes made in the same tick (e.g. `setFilter` then `setOffset(0)`) merge into one entry.
+
 ## Quick Setup
 
 Install the module to your Nuxt application with one command:
