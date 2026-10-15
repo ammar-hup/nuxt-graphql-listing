@@ -132,12 +132,12 @@ function listingQueryKeys(filterConfig: FilterFieldConfig[]): Set<string> {
 }
 
 /**
- * The listing's own keys of a query, every value as a string (the form route.query carries).
+ * The listing's own keys of a query (all keys without `keys`), every value as a string (the form route.query carries).
  */
-function ownedQuery(query: Record<string, any>, keys: Set<string>): Record<string, any> {
+function ownedQuery(query: Record<string, any>, keys?: Set<string>): Record<string, any> {
   const out: Record<string, any> = {}
   for (const [k, v] of Object.entries(normalizeQuery(query))) {
-    if (!keys.has(k)) continue
+    if (keys && !keys.has(k)) continue
     out[k] = Array.isArray(v) ? v.map(String) : String(v)
   }
   return out
@@ -337,8 +337,10 @@ export function useListing<
 
   if (urlBinding && filterConfig) {
     const ownedKeys = listingQueryKeys(filterConfig)
-    // Queries sent to router.replace whose route update has not landed yet, oldest first.
+    // Queries sent to the router whose route update has not landed yet, oldest first.
     let pendingEchoes: Record<string, any>[] = []
+    // The owned query the route watcher last restored (Back/forward); the state watcher writes exactly that state with replace.
+    let restoring: Record<string, any> | null = null
 
     // State → URL
     watch(
@@ -348,9 +350,14 @@ export function useListing<
         const nextQuery = buildListingQuery(newState as any, filterConfig)
         const current = route.query as Record<string, any>
 
-        if (!deepEqual(normalizeQuery(current), normalizeQuery(nextQuery))) {
+        const fromUrl = restoring !== null && deepEqual(ownedQuery(nextQuery, ownedKeys), restoring)
+        restoring = null
+
+        // Compared as strings: a restored `limit=20` matches the state's 20 and writes nothing.
+        if (!deepEqual(ownedQuery(current), ownedQuery(nextQuery))) {
           pendingEchoes.push(ownedQuery(nextQuery, ownedKeys))
-          void router.replace({query: nextQuery, hash: route.hash})
+          const location = {query: nextQuery, hash: route.hash}
+          void (fromUrl ? router.replace(location) : router.push(location))
         }
 
         internalUpdate = false
@@ -384,23 +391,31 @@ export function useListing<
         const asQuery = (s: ListingState<Filters, Sort>) => ownedQuery(buildListingQuery(s as any, filterConfig), ownedKeys)
         if (deepEqual(asQuery(target), asQuery(state.value))) return
         pendingEchoes = []
+        let changed = false
 
         if (target.offset !== offset.value) {
           offset.value = target.offset
+          changed = true
         }
         if (target.limit !== limit.value) {
           limit.value = target.limit
+          changed = true
         }
         if (parsed.filters && !deepEqual(parsed.filters, filters.value)) {
           filters.value = parsed.filters as Filters
+          changed = true
         }
         if (!deepEqual(target.sort, sort.value)) {
           sort.value = structuredClone(target.sort) as Sort
+          changed = true
         }
         cancelSearchCommit()
         if (target.search !== appliedSearch.value) {
           appliedSearch.value = target.search
+          changed = true
         }
+        // Only a state change reaches the state watcher, which consumes the token.
+        restoring = changed ? asQuery(target) : null
         if (target.search !== search.value) {
           search.value = target.search
         }

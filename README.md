@@ -36,6 +36,13 @@ with the search, so a pause sends one request. On the server, or outside a compo
 scope, the search applies at once. Set `searchDebounce: 0` if the page already
 debounces its input, so the two delays don't stack.
 
+## History
+
+Each category, filter, sort, page or committed search change adds a browser-history entry
+(`router.push`), so Back undoes it; state restored from the URL on Back/forward is written with
+`router.replace` and adds none. With `searchDebounce: 0` every committed keystroke adds its own
+entry, and changes made in the same tick (e.g. `setFilter` then `setOffset(0)`) merge into one entry.
+
 ## Quick Setup
 
 Install the module to your Nuxt application with one command:

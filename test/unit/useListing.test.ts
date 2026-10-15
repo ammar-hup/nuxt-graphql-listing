@@ -3,22 +3,24 @@ import { effectScope, reactive } from 'vue'
 import { useListing } from '../../src/runtime/composables/useListing'
 import { clearedFilters } from '../../src/runtime/utils/filters'
 
-const nav = vi.hoisted(() => ({ route: null as any, replace: null as any }))
+const nav = vi.hoisted(() => ({ route: null as any, replace: null as any, push: null as any }))
 
 vi.mock('vue-router', () => ({
   useRoute: () => nav.route,
-  useRouter: () => ({ replace: nav.replace }),
+  useRouter: () => ({ replace: nav.replace, push: nav.push }),
 }))
 
 // Like vue-router: the route updates a microtask later, with string values (arrays kept).
 function resetRouter(query: Record<string, any> = {}) {
   nav.route = reactive({ query, hash: '' })
-  nav.replace = vi.fn(async ({ query: next }: { query: Record<string, any> }) => {
+  const navigate = async ({ query: next }: { query: Record<string, any> }) => {
     await Promise.resolve()
     nav.route.query = Object.fromEntries(
       Object.entries(next).map(([k, v]) => [k, Array.isArray(v) ? v.map(String) : String(v)]),
     )
-  })
+  }
+  nav.replace = vi.fn(navigate)
+  nav.push = vi.fn(navigate)
 }
 
 resetRouter()
@@ -218,7 +220,7 @@ describe('useListing debounced search', () => {
     }
     await settle()
     expect(client.query).toHaveBeenCalledTimes(1)
-    expect(nav.replace).not.toHaveBeenCalled()
+    expect(nav.push).not.toHaveBeenCalled()
 
     vi.advanceTimersByTime(300)
     await settle()
@@ -226,7 +228,9 @@ describe('useListing debounced search', () => {
     expect(lastInput(client).search).toBe('abc')
     expect(lastInput(client).offset).toBe(0)
     expect(listing.offset.value).toBe(0)
-    expect(nav.replace).toHaveBeenCalledTimes(1)
+    expect(nav.push).toHaveBeenCalledTimes(1)
+    expect(nav.push.mock.calls[0][0].query).toEqual({ search: 'abc', limit: 20 })
+    expect(nav.replace).not.toHaveBeenCalled()
   })
 
   it('debounces a direct write to search (v-model)', async () => {
@@ -245,7 +249,8 @@ describe('useListing debounced search', () => {
     await settle()
     expect(client.query).toHaveBeenCalledTimes(2)
     expect(lastInput(client).search).toBe('xy')
-    expect(nav.replace).toHaveBeenCalledTimes(1)
+    expect(nav.push).toHaveBeenCalledTimes(1)
+    expect(nav.replace).not.toHaveBeenCalled()
   })
 
   it('sends one request without search after clearing it', async () => {
@@ -413,7 +418,10 @@ describe('useListing Back and forward', () => {
       vi.advanceTimersByTime(1000)
       await settle()
       expect(client.query).toHaveBeenCalledTimes(2)
-      expect(nav.replace.mock.calls.every(([arg]: any) => arg.query.search === 'zz')).toBe(true)
+      const writes = [...nav.push.mock.calls, ...nav.replace.mock.calls]
+      expect(writes).toHaveLength(1)
+      expect(writes.every(([arg]: any) => arg.query.search === 'zz')).toBe(true)
+      expect(nav.push).not.toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
     }
@@ -436,12 +444,14 @@ describe('useListing search edge cases', () => {
     expect(client.query).toHaveBeenCalledTimes(2)
     expect(lastInput(client)).toMatchObject({ search: 'zz', offset: 20 })
     const replaces = nav.replace.mock.calls.length
+    expect(nav.push).not.toHaveBeenCalled()
 
     vi.advanceTimersByTime(1000)
     await settle()
     expect(listing.offset.value).toBe(20)
     expect(client.query).toHaveBeenCalledTimes(2)
     expect(nav.replace).toHaveBeenCalledTimes(replaces)
+    expect(nav.push).not.toHaveBeenCalled()
   })
 
   it('keeps what is being typed when a key the listing does not own changes', async () => {
@@ -467,7 +477,7 @@ describe('useListing search edge cases', () => {
     listing.setSearch('abc')
     vi.advanceTimersByTime(300)
     await Promise.resolve()
-    expect(nav.replace).toHaveBeenCalledTimes(1)
+    expect(nav.push).toHaveBeenCalledTimes(1)
     listing.setOffset(20)
     listing.search.value = 'abcd'
     await settle()
@@ -535,5 +545,152 @@ describe('useListing search edge cases', () => {
     await settle()
     expect(client.query).toHaveBeenCalledTimes(2)
     expect(lastInput(client).search).toBe('a')
+  })
+})
+
+describe('useListing history', () => {
+  const sortTitle = [{ field: 'title', direction: 'ASC' }]
+
+  it('pushes one entry for a filter change', async () => {
+    const { listing } = setup([ok([])], { filterConfig })
+    await settle()
+    listing.setFilter({ categoryId: 'c' } as any)
+    await settle()
+    expect(nav.push).toHaveBeenCalledTimes(1)
+    expect(nav.push.mock.calls[0][0].query).toMatchObject({ categoryId: 'c' })
+    expect(nav.replace).not.toHaveBeenCalled()
+  })
+
+  it('pushes one entry each for a sort and a page change', async () => {
+    const { listing } = setup([ok([])], { filterConfig })
+    await settle()
+    listing.setSort(sortTitle as any)
+    await settle()
+    listing.setOffset(20)
+    await settle()
+    expect(nav.push).toHaveBeenCalledTimes(2)
+    expect(nav.push.mock.calls[0][0].query).toMatchObject({ sort: 'title:ASC' })
+    expect(nav.push.mock.calls[0][0].query).not.toHaveProperty('offset')
+    expect(nav.push.mock.calls[1][0].query).toMatchObject({ offset: 20, sort: 'title:ASC' })
+    expect(nav.replace).not.toHaveBeenCalled()
+  })
+
+  it('pushes one entry for setFilter and setOffset(0) in the same tick', async () => {
+    const { client, listing } = setup([ok([])], { filterConfig, initialOffset: 20 })
+    await settle()
+    listing.setFilter({ categoryId: 'c' } as any)
+    listing.setOffset(0)
+    await settle()
+    expect(nav.push).toHaveBeenCalledTimes(1)
+    expect(nav.replace).not.toHaveBeenCalled()
+    expect(client.query).toHaveBeenCalledTimes(2)
+  })
+
+  it('restores each earlier URL on Back without writing to history', async () => {
+    resetRouter({ limit: '20' })
+    const { client, listing } = setup([ok([])], { filterConfig })
+    await settle()
+    const start = { ...nav.route.query }
+    listing.setFilter({ categoryId: 'c' } as any)
+    await settle()
+    const afterFilter = { ...nav.route.query }
+    listing.setOffset(20)
+    await settle()
+    expect(nav.push).toHaveBeenCalledTimes(2)
+    const requests = client.query.mock.calls.length
+
+    nav.route.query = afterFilter
+    await settle()
+    expect(listing.offset.value).toBe(0)
+    expect(listing.filters.value).toMatchObject({ categoryId: 'c' })
+
+    nav.route.query = start
+    await settle()
+    expect(listing.filters.value).toEqual({})
+    expect(client.query).toHaveBeenCalledTimes(requests + 2)
+    expect(nav.push).toHaveBeenCalledTimes(2)
+    expect(nav.replace).not.toHaveBeenCalled()
+
+    listing.setOffset(20)
+    await settle()
+    expect(nav.push).toHaveBeenCalledTimes(3)
+  })
+
+  it('pushes a user change made in the same tick as a Back', async () => {
+    resetRouter({ limit: '20' })
+    const { listing } = setup([ok([])], { filterConfig })
+    await settle()
+    const start = { ...nav.route.query }
+    listing.setFilter({ categoryId: 'c' } as any)
+    await settle()
+    expect(nav.push).toHaveBeenCalledTimes(1)
+
+    listing.setOffset(40)
+    nav.route.query = start
+    await settle()
+    expect(nav.push).toHaveBeenCalledTimes(2)
+    expect(nav.push.mock.calls[1][0].query).toMatchObject({ categoryId: 'c', offset: 40 })
+    expect(nav.replace).not.toHaveBeenCalled()
+    expect(listing.offset.value).toBe(40)
+  })
+
+  it('replaces when a restored URL rebuilds differently', async () => {
+    const { listing } = setup([ok([])], { filterConfig })
+    await settle()
+    nav.route.query = { categoryId: 'c', offset: '0' }
+    await settle()
+    expect(listing.filters.value).toMatchObject({ categoryId: 'c' })
+    expect(nav.push).not.toHaveBeenCalled()
+    expect(nav.replace).toHaveBeenCalledTimes(1)
+    expect(nav.replace.mock.calls[0][0].query).not.toHaveProperty('offset')
+
+    listing.setOffset(40)
+    await settle()
+    expect(nav.push).toHaveBeenCalledTimes(1)
+    expect(nav.replace).toHaveBeenCalledTimes(1)
+  })
+
+  it('pushes the next user change after a restore that changed nothing', async () => {
+    const { listing } = setup([ok([])], { filterConfig })
+    await settle()
+    nav.route.query = { ...nav.route.query, tab: 'other' }
+    await settle()
+    listing.setOffset(20)
+    await settle()
+    expect(nav.push).toHaveBeenCalledTimes(1)
+    expect(nav.replace).not.toHaveBeenCalled()
+  })
+
+  it('writes nothing on mount from a URL with filters', async () => {
+    resetRouter({ categoryId: 'c', offset: '20', search: 'abc' })
+    const { client, listing } = setup([ok([])], { filterConfig })
+    await settle()
+    expect(listing.filters.value).toMatchObject({ categoryId: 'c' })
+    expect(lastInput(client)).toMatchObject({ offset: 20, search: 'abc' })
+    expect(nav.push).not.toHaveBeenCalled()
+    expect(nav.replace).not.toHaveBeenCalled()
+  })
+
+  it('pushes one entry per committed search', async () => {
+    vi.useFakeTimers()
+    try {
+      const { listing } = setup([ok([])], { filterConfig, initialOffset: 20 })
+      await settle()
+      for (const value of ['a', 'ab', 'abc']) {
+        listing.setSearch(value)
+        await settle()
+        vi.advanceTimersByTime(100)
+      }
+      await settle()
+      expect(nav.push).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(300)
+      await settle()
+      expect(nav.push).toHaveBeenCalledTimes(1)
+      expect(nav.push.mock.calls[0][0].query).toMatchObject({ search: 'abc' })
+      expect(nav.push.mock.calls[0][0].query).not.toHaveProperty('offset')
+      expect(nav.replace).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
