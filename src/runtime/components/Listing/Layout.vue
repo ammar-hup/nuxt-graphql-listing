@@ -2,6 +2,7 @@
 import { computed, ref, useSlots } from "vue";
 import Topbar from "./Topbar.vue";
 import { useListingI18n } from "../../composables/useListingI18n";
+import { clearedFilters } from "../../utils/filters";
 import type { SortOption, SortInput, FilterFieldConfig, FieldKeyedFacets } from "../../types/listing";
 
 interface EmptyAction {
@@ -66,7 +67,9 @@ const page = computed({
   },
   set(newPage) {
     const safePage = newPage < 1 ? 1 : newPage;
-    emit("update:offset", (safePage - 1) * props.limit);
+    const nextOffset = (safePage - 1) * props.limit;
+    // UPagination re-emits the current page; that is not a page change.
+    if (nextOffset !== props.offset) emit("update:offset", nextOffset);
   }
 });
 const pageCount = computed(() => {
@@ -84,6 +87,15 @@ const to = computed(() => {
 });
 function onFilterChange(patch: Record<string, any>): void {
   emit("update:filters", patch);
+}
+// setFilter also resets the offset, so one emit is one request; with nothing to clear, the offset emit refetches.
+function resetFilters(): void {
+  const patch = clearedFilters(props.filters);
+  if (Object.keys(patch).length > 0) {
+    emit("update:filters", patch);
+  } else {
+    emit("update:offset", 0);
+  }
 }
 </script>
 
@@ -183,10 +195,7 @@ function onFilterChange(patch: Record<string, any>): void {
     label: t('listing.empty.resetFilters'),
     color: 'neutral',
     variant: 'subtle',
-    onClick: () => {
-      $emit('update:filters', {});
-      $emit('update:offset', 0);
-    }
+    onClick: resetFilters
   }
 ]"
             >
@@ -226,7 +235,7 @@ function onFilterChange(patch: Record<string, any>): void {
           />
         </template>
 
-        <div class="flex items-center justify-between gap-2 mt-6" v-if="!loading && items.length > 0">
+        <div class="flex items-center justify-between gap-2 mt-6" v-if="!loading && !error && items.length > 0">
           <div class="flex flex-wrap gap-2 text-sm text-neutral dark:text-gray-300 font-medium">
             <span v-text="t('listing.pagination', { page, pageCount })"/>
             <span class="">•</span>

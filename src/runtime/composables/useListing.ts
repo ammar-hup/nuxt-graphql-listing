@@ -1,7 +1,7 @@
 import type {ListingResult, ListingState, SortInput, UseListingOptions, UseListingReturn} from '../types/listing'
 import {deepEqual, normalizeQuery} from '../utils'
 import {buildListingQuery, parseListingQuery} from '../utils/urlState'
-import {computed, type Ref, ref, watch, unref} from 'vue'
+import {computed, nextTick, type Ref, ref, watch, unref} from 'vue'
 import {useRoute, useRouter} from 'vue-router'
 
 /**
@@ -86,6 +86,19 @@ function defaultMapResult<Item, Facets>(data: any, dataPath: string): ListingRes
     total: root?.total ?? 0,
     facets: root?.facets ?? null,
   }
+}
+
+/**
+ * The error a resolved query carries. Under `errorPolicy: 'all'` GraphQL errors
+ * come back in the result instead of being thrown: Apollo 4 sets `error`,
+ * Apollo 3 sets an `errors` array.
+ */
+function resultError(result: any): Error | null {
+  const errors = Array.isArray(result?.errors) && result.errors.length > 0 ? result.errors : null
+  const source = result?.error ?? errors
+  if (!source) return null
+  const message = result?.error?.errors?.[0]?.message || result?.error?.message || errors?.[0]?.message
+  return new Error(message || 'Request failed', {cause: source})
 }
 
 export function useListing<
@@ -188,7 +201,10 @@ export function useListing<
   const pending = ref(true)
   const error = ref<Error | null>(null)
 
+  let fetchCount = 0
+
   const fetchData = async () => {
+    fetchCount++
     pending.value = true
     error.value = null
     try {
@@ -197,7 +213,12 @@ export function useListing<
         variables: variables.value,
         fetchPolicy: 'network-only',
       })
-      data.value = mapResult(result.data)
+      const failure = resultError(result)
+      if (failure) {
+        error.value = failure
+      } else {
+        data.value = mapResult(result.data)
+      }
     } catch (e) {
       error.value = e as Error
     } finally {
@@ -283,7 +304,19 @@ export function useListing<
   }
 
   function setOffset(newOffset: number) {
-    offset.value = newOffset < 0 ? 0 : newOffset
+    const next = newOffset < 0 ? 0 : newOffset
+    // An unchanged offset fires no watcher, so a Retry on the current page refetches here.
+    // Two ticks let a same-tick setFilter's watcher run first (in either call order); its fetch counts.
+    if (next === offset.value) {
+      const seen = fetchCount
+      void nextTick()
+        .then(() => nextTick())
+        .then(() => {
+          if (fetchCount === seen) void fetchData()
+        })
+      return
+    }
+    offset.value = next
   }
 
   function setLimit(newLimit: number) {

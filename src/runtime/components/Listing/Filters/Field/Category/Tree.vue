@@ -155,12 +155,12 @@ function onSelect(slug: string) {
       </span>
     </div>
 
-    <!-- Empty state -->
-    <div v-if="!facetOptions || facetOptions.length === 0" class="text-sm text-neutral-500 py-2">
+    <!-- Empty state; null facets mean unknown (not loaded, or the request failed), not empty -->
+    <div v-if="facetOptions && facetOptions.length === 0" class="text-sm text-neutral-500 py-2">
       {{ t("listing.noCategories") }}
     </div>
 
-    <!-- Category list -->
+    <!-- Category list; with facets unknown only "All categories" shows, so a URL-set category can be cleared -->
     <div v-else class="text-sm space-y-0.5">
       <!-- All categories option -->
       <button
@@ -175,34 +175,36 @@ function onSelect(slug: string) {
         <span>{{ t("listing.allCategories") }}</span>
       </button>
 
-      <!-- Tree nodes -->
-      <template v-for="(nodes, treeId) in trees" :key="treeId">
-        <ul class="m-0 p-0 list-none">
-          <CategoryTreeNode
-            v-for="(node, idx) in nodes"
-            :key="treeId + '/' + node.slug + '-' + idx"
-            :node="node"
-            :path-key="treeId + '/' + node.slug + '-' + idx"
-            :selected="selected"
-            :expanded="expanded"
-            @toggle="onToggle"
-            @select="onSelect"
-          />
-        </ul>
-      </template>
+      <template v-if="facetOptions">
+        <!-- Tree nodes -->
+        <template v-for="(nodes, treeId) in trees" :key="treeId">
+          <ul class="m-0 p-0 list-none">
+            <CategoryTreeNode
+              v-for="(node, idx) in nodes"
+              :key="treeId + '/' + node.slug + '-' + idx"
+              :node="node"
+              :path-key="treeId + '/' + node.slug + '-' + idx"
+              :selected="selected"
+              :expanded="expanded"
+              @toggle="onToggle"
+              @select="onSelect"
+            />
+          </ul>
+        </template>
 
-      <!-- Uncategorized option -->
-      <button
-        type="button"
-        class="w-full flex items-center gap-2 py-1.5 px-2 rounded-lg transition-colors text-start"
-        :class="selected === '__uncategorized__'
-          ? 'bg-primary-50 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 font-semibold'
-          : 'hover:bg-gray-50 dark:hover:bg-gray-800/50 text-gray-500 dark:text-gray-400'"
-        @click="selectUncategorized"
-      >
-        <UIcon name="i-lucide-circle-off" class="size-4 shrink-0"/>
-        <span>{{ t("listing.uncategorized") }}</span>
-      </button>
+        <!-- Uncategorized option -->
+        <button
+          type="button"
+          class="w-full flex items-center gap-2 py-1.5 px-2 rounded-lg transition-colors text-start"
+          :class="selected === '__uncategorized__'
+            ? 'bg-primary-50 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 font-semibold'
+            : 'hover:bg-gray-50 dark:hover:bg-gray-800/50 text-gray-500 dark:text-gray-400'"
+          @click="selectUncategorized"
+        >
+          <UIcon name="i-lucide-circle-off" class="size-4 shrink-0"/>
+          <span>{{ t("listing.uncategorized") }}</span>
+        </button>
+      </template>
     </div>
   </div>
 </template>

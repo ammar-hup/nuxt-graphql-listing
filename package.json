@@ -1,6 +1,6 @@
 {
   "name": "@fritill-team/nuxt-graphql-listing",
-  "version": "0.0.46",
+  "version": "0.0.47",
   "description": "A Nuxt module for building listing interfaces with GraphQL, featuring filtering, sorting, pagination, and URL state management",
   "repository": {
     "type": "git",
@@ -50,6 +50,7 @@
     "@nuxt/ui": "4.3.0",
     "@nuxtjs/i18n": "9.3.3",
     "@types/node": "latest",
+    "@vitejs/plugin-vue": "^6.0.10",
     "better-sqlite3": "^12.6.0",
     "changelogen": "^0.6.2",
     "eslint": "^9.39.2",
