@@ -43,6 +43,10 @@ Each category, filter, sort, page or committed search change adds a browser-hist
 `router.replace` and adds none. With `searchDebounce: 0` every committed keystroke adds its own
 entry, and changes made in the same tick (e.g. `setFilter` then `setOffset(0)`) merge into one entry.
 
+## Range filters
+
+In the filter drawer, number range fields (`int-range`/`decimal-range`) commit through the drawer's Apply; in the sidebar they keep their own Apply and Clear.
+
 ## Quick Setup
 
 Install the module to your Nuxt application with one command:

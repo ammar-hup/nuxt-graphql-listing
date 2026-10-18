@@ -60,6 +60,7 @@ function onFieldChange(patch: Record<string, any>): void {
         :filters="localFilters"
         :config="props.config"
         :facets="props.facets"
+        draft
         @change="onFieldChange"
       />
     </template>

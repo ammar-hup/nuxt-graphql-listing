@@ -9,9 +9,13 @@ const props = withDefaults(defineProps<{
   filters: Record<string, any>
   facetMin?: number | null
   facetMax?: number | null
+  // Set by a host that keeps a draft (the drawer): each change goes straight
+  // into the draft and the host's Apply is the only commit.
+  draft?: boolean
 }>(), {
   facetMin: undefined,
-  facetMax: undefined
+  facetMax: undefined,
+  draft: false
 });
 const emit = defineEmits<{
   change: [patch: Record<string, any>]
@@ -19,6 +23,10 @@ const emit = defineEmits<{
 const { t } = useListingI18n();
 const minBound = computed(() => props.facetMin ?? 0);
 const maxBound = computed(() => props.facetMax ?? 1e3);
+// With nothing priced the facet is 0–0: the slider would have no track,
+// min/max attributes would pin the spinner to 0–0 and mark typed values
+// :invalid, and the placeholders would show 0 (or inverted hints if min > max).
+const hasRange = computed(() => minBound.value < maxBound.value);
 // null = the user left this end empty: no limit. The facet bounds are only
 // placeholders and slider track ends, never a value that gets submitted.
 const localGte = ref<RangeBound>(null);
@@ -48,6 +56,24 @@ const sliderModel = computed({
     if (max !== shownMax) localLte.value = sliderEndToBound(max, maxBound.value);
   }
 });
+// Emitted from handlers, not a watch, so the draft only changes on input and
+// never echoes a resync from props.filters back as a change.
+function onDraftChange() {
+  if (props.draft) onSubmit();
+}
+function onGteInput(value: RangeBound) {
+  localGte.value = value;
+  onDraftChange();
+}
+function onLteInput(value: RangeBound) {
+  localLte.value = value;
+  onDraftChange();
+}
+function onSliderInput(values: number | number[] | undefined) {
+  if (!Array.isArray(values)) return;
+  sliderModel.value = values;
+  onDraftChange();
+}
 function onSubmit() {
   emit("change", {
     [props.field.field]: buildRangeValue(localGte.value, localLte.value)
@@ -70,37 +96,40 @@ function onClear() {
     <div class="flex gap-3 w-full">
       <UFormField :label="t('listing.range.min')" class="w-full">
         <UInput
-          v-model.number="localGte"
+          :model-value="localGte"
           type="number"
           size="sm"
-          :placeholder="String(minBound)"
-          :min="minBound"
-          :max="maxBound"
+          :placeholder="hasRange ? String(minBound) : undefined"
+          :min="hasRange ? minBound : undefined"
+          :max="hasRange ? maxBound : undefined"
           class="w-full"
+          @update:model-value="onGteInput"
         />
       </UFormField>
       <UFormField :label="t('listing.range.max')" class="w-full">
         <UInput
-          v-model.number="localLte"
+          :model-value="localLte"
           type="number"
           size="sm"
-          :placeholder="String(maxBound)"
-          :min="minBound"
-          :max="maxBound"
+          :placeholder="hasRange ? String(maxBound) : undefined"
+          :min="hasRange ? minBound : undefined"
+          :max="hasRange ? maxBound : undefined"
           class="w-full"
+          @update:model-value="onLteInput"
         />
       </UFormField>
     </div>
 
-    <div class="w-full pt-2">
+    <div v-if="hasRange" class="w-full pt-2">
       <USlider
-        v-model="sliderModel"
+        :model-value="sliderModel"
         :min="minBound"
         :max="maxBound"
+        @update:model-value="onSliderInput"
       />
     </div>
 
-    <div class="flex justify-end gap-2">
+    <div v-if="!draft" class="flex justify-end gap-2">
       <UButton variant="ghost" size="xs" @click="onClear">
         {{ t("listing.clear") }}
       </UButton>

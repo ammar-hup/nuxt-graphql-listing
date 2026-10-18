@@ -5,8 +5,15 @@ export const i18nMock = () => ({
   useListingI18n: () => ({ t: (key: string) => key, locale: ref('en') }),
 })
 
-/** Records the props each stubbed Nuxt UI component received. */
+/** Records the props each stubbed Nuxt UI component received (the last instance). */
 export const received: Record<string, Record<string, any>> = {}
+/** Every instance's props, in render order, for components rendered more than once. */
+export const instances: Record<string, Record<string, any>[]> = {}
+
+export function resetReceived() {
+  for (const k of Object.keys(received)) Reflect.deleteProperty(received, k)
+  for (const k of Object.keys(instances)) Reflect.deleteProperty(instances, k)
+}
 
 function stub(name: string, props: string[] = []) {
   return defineComponent({
@@ -14,6 +21,7 @@ function stub(name: string, props: string[] = []) {
     props,
     setup(p, { slots, attrs }) {
       received[name] = { ...attrs, ...p }
+      ;(instances[name] ??= []).push(received[name])
       return () => h('div', { 'data-stub': name }, slots.default?.())
     },
   })
@@ -26,4 +34,8 @@ export function registerStubs(app: App) {
   app.component('UIcon', stub('UIcon', ['name']))
   app.component('ListingLoading', stub('ListingLoading'))
   app.component('LazyListingFiltersAsidePanel', stub('LazyListingFiltersAsidePanel'))
+  app.component('UFormField', stub('UFormField', ['label']))
+  app.component('UInput', stub('UInput', ['modelValue', 'type', 'size', 'placeholder', 'min', 'max']))
+  app.component('USlider', stub('USlider', ['modelValue', 'min', 'max']))
+  app.component('UButton', stub('UButton', ['variant', 'color', 'size', 'label']))
 }
