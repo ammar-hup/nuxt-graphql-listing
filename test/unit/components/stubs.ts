@@ -15,14 +15,16 @@ export function resetReceived() {
   for (const k of Object.keys(instances)) Reflect.deleteProperty(instances, k)
 }
 
-function stub(name: string, props: string[] = []) {
+/** `allSlots` renders named slots too (e.g. UInputDate's #trailing, UPopover's #content). */
+function stub(name: string, props: string[] = [], allSlots = false) {
   return defineComponent({
     name,
     props,
     setup(p, { slots, attrs }) {
       received[name] = { ...attrs, ...p }
       ;(instances[name] ??= []).push(received[name])
-      return () => h('div', { 'data-stub': name }, slots.default?.())
+      return () => h('div', { 'data-stub': name },
+        allSlots ? Object.values(slots).flatMap(s => s?.() ?? []) : slots.default?.())
     },
   })
 }
@@ -38,4 +40,8 @@ export function registerStubs(app: App) {
   app.component('UInput', stub('UInput', ['modelValue', 'type', 'size', 'placeholder', 'min', 'max']))
   app.component('USlider', stub('USlider', ['modelValue', 'min', 'max']))
   app.component('UButton', stub('UButton', ['variant', 'color', 'size', 'label']))
+  app.component('URadioGroup', stub('URadioGroup', ['modelValue', 'items']))
+  app.component('UInputDate', stub('UInputDate', ['modelValue', 'range'], true))
+  app.component('UPopover', stub('UPopover', [], true))
+  app.component('UCalendar', stub('UCalendar', ['modelValue', 'range', 'numberOfMonths']))
 }

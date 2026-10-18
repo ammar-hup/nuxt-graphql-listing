@@ -3,10 +3,15 @@ import { ref, computed, shallowRef, watch, useTemplateRef } from "vue";
 import { CalendarDate, getLocalTimeZone, parseDate, today } from "@internationalized/date";
 import { useListingI18n } from "../../../../composables/useListingI18n";
 import type { DateTimeRangeGroupFilterFieldConfig } from "../../../../types/listing";
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   field: DateTimeRangeGroupFilterFieldConfig
   filters: Record<string, any>
-}>();
+  // Set by a host that keeps a draft (the drawer): each complete range goes
+  // straight into the draft and the host's Apply is the only commit.
+  draft?: boolean
+}>(), {
+  draft: false
+});
 const emit = defineEmits<{
   change: [patch: Record<string, any>]
 }>();
@@ -95,8 +100,10 @@ function syncRangeFromFiltersForActive() {
     rangeModel.value = null;
   }
 }
+// Only this group's own fields: the drawer replaces the whole draft on any
+// field's change, which would otherwise reset a half-picked range mid-selection.
 watch(
-  () => props.filters,
+  () => props.field.dateFields.map((df) => props.filters[df.field]),
   () => {
     syncRangeFromFiltersForActive();
   },
@@ -134,6 +141,19 @@ function clearGroup() {
   activeField.value = "";
   showDateRange.value = false;
 }
+// Emitted from handlers, not a watch, so the draft only changes on input and
+// never echoes a resync from props.filters back as a change.
+function onFieldPick(newField: string) {
+  resolvedActiveField.value = newField;
+  if (props.draft) applyRange();
+}
+function onRangeInput(value: { start?: unknown; end?: unknown } | null | undefined) {
+  rangeModel.value = (value ?? null) as typeof rangeModel.value;
+  if (!props.draft) return;
+  // An emptied input clears the group in the draft; a half-chosen range is
+  // never emitted, since the resync would hide the picker mid-selection.
+  if (Boolean(value?.start) === Boolean(value?.end)) applyRange();
+}
 const inputDateRef = useTemplateRef("inputDateRef");
 </script>
 
@@ -149,8 +169,9 @@ const inputDateRef = useTemplateRef("inputDateRef");
 		<!-- Radio group: which date field to filter on -->
 		
 		<URadioGroup
-			v-model="resolvedActiveField"
+			:model-value="resolvedActiveField"
 			:items="fields"
+			@update:model-value="onFieldPick"
 		/>
 
 		<!-- Date range appears only after selecting a field or when URL has a range -->
@@ -158,8 +179,9 @@ const inputDateRef = useTemplateRef("inputDateRef");
 		<div v-if="showDateRange" class="space-y-2">
 			<UInputDate
 				ref="inputDateRef"
-				v-model="rangeModel"
+				:model-value="rangeModel"
 				range
+				@update:model-value="onRangeInput"
 			>
 				<template #trailing>
 					<div class="flex items-center gap-2">
@@ -174,10 +196,11 @@ const inputDateRef = useTemplateRef("inputDateRef");
 							/>
 							<template #content>
 								<UCalendar
-									v-model="rangeModel"
+									:model-value="rangeModel"
 									class="p-2"
 									:number-of-months="2"
 									range
+									@update:model-value="onRangeInput"
 								/>
 							</template>
 						</UPopover>
@@ -193,6 +216,7 @@ const inputDateRef = useTemplateRef("inputDateRef");
 					{{ t("listing.clear") }}
 				</UButton>
 				<UButton
+					v-if="!draft"
 					size="xs"
 					variant="soft"
 					color="primary"

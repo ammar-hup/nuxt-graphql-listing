@@ -84,11 +84,12 @@ function getFacetProps(field: FilterFieldConfig): Record<string, any> {
   }
   return {};
 }
-// Only number range fields (int-range/decimal-range) learn the host keeps a
-// draft; other fields and custom components get no new attribute.
+// Only range fields (int-range/decimal-range/datetime-range-group) learn the
+// host keeps a draft; other fields and custom components get no new attribute.
+const DRAFT_KINDS = new Set(["int-range", "decimal-range", "datetime-range-group"]);
 function getDraftProps(field: FilterFieldConfig): Record<string, any> {
   if (!props.draft) return {};
-  return field.kind === "int-range" || field.kind === "decimal-range" ? { draft: true } : {};
+  return DRAFT_KINDS.has(field.kind) ? { draft: true } : {};
 }
 function onFieldChange(patch: Record<string, any>): void {
   emit("change", patch);

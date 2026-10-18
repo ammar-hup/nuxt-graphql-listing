@@ -45,7 +45,7 @@ entry, and changes made in the same tick (e.g. `setFilter` then `setOffset(0)`) 
 
 ## Range filters
 
-In the filter drawer, number range fields (`int-range`/`decimal-range`) commit through the drawer's Apply; in the sidebar they keep their own Apply and Clear.
+In the filter drawer, number range fields (`int-range`/`decimal-range`) and the date range group (`datetime-range-group`) commit through the drawer's Apply; the date range group's Clear there only clears the drawer's draft. In the sidebar they keep their own Apply and Clear.
 
 ## Quick Setup
 
