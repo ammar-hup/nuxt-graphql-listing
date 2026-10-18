@@ -13,8 +13,10 @@ const props = withDefaults(defineProps<{
   filters: Record<string, any>
   config: FilterFieldConfig[]
   facets?: FieldKeyedFacets | null
+  draft?: boolean
 }>(), {
-  facets: undefined
+  facets: undefined,
+  draft: false
 });
 const emit = defineEmits<{
   change: [patch: Record<string, any>]
@@ -82,6 +84,12 @@ function getFacetProps(field: FilterFieldConfig): Record<string, any> {
   }
   return {};
 }
+// Only number range fields (int-range/decimal-range) learn the host keeps a
+// draft; other fields and custom components get no new attribute.
+function getDraftProps(field: FilterFieldConfig): Record<string, any> {
+  if (!props.draft) return {};
+  return field.kind === "int-range" || field.kind === "decimal-range" ? { draft: true } : {};
+}
 function onFieldChange(patch: Record<string, any>): void {
   emit("change", patch);
 }
@@ -109,7 +117,7 @@ function onFieldChange(patch: Record<string, any>): void {
         v-else
         :field="field"
         :filters="filters"
-        v-bind="{ ...getFacetProps(field), ...getCustomProps(field) }"
+        v-bind="{ ...getFacetProps(field), ...getDraftProps(field), ...getCustomProps(field) }"
         @change="onFieldChange"
       />
     </template>
